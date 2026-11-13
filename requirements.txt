@@ -1,0 +1,7 @@
+streamlit>=1.40,<2
+pandas>=2.2,<3
+numpy>=1.26
+yfinance>=0.2.54,<1
+requests>=2.31
+lxml>=5
+exchange_calendars>=4.7,<5
