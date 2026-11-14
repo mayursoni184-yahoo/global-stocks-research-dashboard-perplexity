@@ -10,7 +10,7 @@ SOURCES = {
  "Dow": [("https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",30,30), ("https://en.wikipedia.org/wiki/List_of_Dow_Jones_Industrial_Average_companies",30,30)],
  "FTSE 100": [("https://en.wikipedia.org/wiki/FTSE_100_Index",100,105)],
  "FTSE 250": [("https://en.wikipedia.org/wiki/FTSE_250_Index",245,260)],
- "FTSE AIM All-Share": [("https://www.lse.co.uk/share-prices/indices/ftse-aim-all-share/constituents.html",200,1500)],
+ "FTSE AIM All-Share": [], # Repository snapshot only; no web scraping
 }
 
 def clean(value):
@@ -59,10 +59,50 @@ def parse_table(html, group, minimum, maximum):
         return rows
     raise ValueError("No validated constituent table: "+"; ".join(reasons))
 
+
+
+def load_aim_snapshot():
+    from pathlib import Path
+    import json
+    import hashlib
+    root = Path(__file__).resolve().parent.parent
+    csv_path = root / "data" / "ftse_aim_all_share.csv"
+    meta_path = root / "data" / "ftse_aim_all_share_metadata.json"
+    if not csv_path.is_file() or not meta_path.is_file():
+        raise ValueError("AIM snapshot missing. Add data/ftse_aim_all_share.csv and data/ftse_aim_all_share_metadata.json at repository root. No live AIM scrape is attempted.")
+    raw = csv_path.read_bytes()
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if hashlib.sha256(raw).hexdigest() != meta.get("csv_sha256"):
+        raise ValueError("AIM CSV integrity check failed; CSV differs from its metadata. Regenerate metadata when intentionally updating the snapshot.")
+    rows = pd.read_csv(StringIO(raw.decode("utf-8")), dtype=str, keep_default_na=False)
+    required = {"symbol", "name", "group", "yahoo_symbol"}
+    if not required.issubset(rows.columns):
+        raise ValueError("AIM snapshot columns missing")
+    if rows.empty or any(rows[c].str.strip().eq("").any() for c in required):
+        raise ValueError("Empty AIM snapshot or blank constituent fields")
+    if set(rows.group) != {"FTSE AIM All-Share"}:
+        raise ValueError("AIM snapshot has unexpected group values")
+    if rows.symbol.duplicated().any() or rows.yahoo_symbol.duplicated().any():
+        raise ValueError("AIM snapshot contains duplicate symbols")
+    if len(rows) != meta.get("rows"):
+        raise ValueError("AIM snapshot count differs from metadata")
+    report = dict(group="FTSE AIM All-Share", rows=len(rows),
+        source="Repository CSV — originally user-saved London South East page",
+        snapshot_extracted_date=meta.get("snapshot_extracted_date"),
+        membership_as_of=meta.get("membership_as_of"),
+        retrieved_utc=pd.Timestamp.now(tz="UTC").isoformat(),
+        validation="File integrity and count checked; current membership and Yahoo aliases not independently verified")
+    return rows, report
+
 @st.cache_data(ttl=86400,show_spinner=False)
 def load(market):
     frames=[]; report=[]
     for group in MARKETS[market]["groups"]:
+        if group == "FTSE AIM All-Share":
+            rows, snapshot_report = load_aim_snapshot()
+            frames.append(rows)
+            report.append(snapshot_report)
+            continue
         errors=[]; rows=None
         for url,minimum,maximum in SOURCES[group]:
             try:
