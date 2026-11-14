@@ -1,0 +1,14 @@
+{
+  "snapshot_extracted_date": "2026-11-14",
+  "membership_as_of": "Not independently verified; saved page supplied by user",
+  "source": "https://www.lse.co.uk/share-prices/indices/ftse-aim-all-share/constituents.html",
+  "source_file": "FTSE-AIM-All-Share-Constituents.html",
+  "source_html_sha256": "42cb4af19f22db86d11362abaa55d0570e61d000011096d1b9e6d3270b63a3dc",
+  "csv_sha256": "49b6a4f0323fff234bd52ea1a8d04c306d5b46062d3bdef12d30d108cbddd6e8",
+  "rows": 488,
+  "unique_symbols": 488,
+  "unparsed_rows": 0,
+  "duplicate_symbols": 0,
+  "yahoo_symbols": "Derived from source symbols; not verified with Yahoo",
+  "note": "Unfiltered AIM source snapshot; current GBP market-cap filtering still runs later."
+}
