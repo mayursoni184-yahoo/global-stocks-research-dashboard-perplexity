@@ -4,7 +4,7 @@ import time
 import pandas as pd
 import streamlit as st
 from core.expanded_us_universe import get_directory, parse_directory, get_dow, combine, universe_hash, URL
-from core.data import cap, history, completed
+from core.data import cap, history, calendar_sessions
 from core.historical import indicators, records, calculate_historical_study_summary
 KEY="expanded_us_v1"
 THRESHOLD=1_000_000_000
@@ -50,15 +50,33 @@ def scan_remaining(state, pause, progress):
     done={r["ticker"] for r in state["diag"]}
     todo=state["u"].loc[~state["u"].ticker.isin(done)].sort_values("ticker")
     stopped=False
+    # One session cut-off and one calendar for the full run, not per IPO date.
+    now=pd.Timestamp.now(tz="UTC")
+    schedule=None
+    valid_dates=None
+    run_start=time.monotonic()
+    started_count=len(state["diag"])
     for _,stock in todo.iterrows():
         row=dict(ticker=stock.ticker,name=stock["name"],group=stock.group,checked_utc=pd.Timestamp.now(tz="UTC").isoformat())
-        progress(len(state["diag"]),len(state["u"]),stock.ticker)
+        progress(len(state["diag"]),len(state["u"]),f"Market-cap check: {stock.ticker}")
         try:
             value,note=cap(stock.ticker,"US")
             row.update(market_cap=value,currency="USD",cap_note=note)
-            if value<=THRESHOLD: row.update(status="Below/equal USD1bn",signals=0)
+            if value<=THRESHOLD:
+                row.update(status="Below/equal USD1bn",signals=0)
             else:
-                data,schedule=completed(history(stock.ticker),"US")
+                progress(len(state["diag"]),len(state["u"]),f"Historical analysis: {stock.ticker}")
+                data=history(stock.ticker)
+                if schedule is None:
+                    lower=f"{now.year-8}-01-01"
+                    upper=str((now+pd.Timedelta(days=14)).date())
+                    schedule=calendar_sessions("US",lower,upper)
+                    ix=pd.DatetimeIndex(schedule.index).tz_localize(None).normalize()
+                    closes=pd.to_datetime(schedule["close"],utc=True)
+                    valid_dates=ix[(closes<=now).to_numpy()]
+                if data.index.min()<pd.Timestamp(schedule.index.min()).tz_localize(None).normalize():
+                    raise ValueError("History predates the common calendar range; update expanded scanner bounds")
+                data=data.loc[data.index.isin(valid_dates)].copy()
                 if len(data)<200: raise ValueError(f"Insufficient completed daily rows: {len(data)}")
                 data=indicators(data,schedule)
                 r=records(data,stock,value)
@@ -67,15 +85,23 @@ def scan_remaining(state, pause, progress):
         except Exception as e:
             row.update(status="Error",signals=0,reason=f"{type(e).__name__}: {e}")
         state["diag"].append(row)
-        progress(len(state["diag"]),len(state["u"]),stock.ticker)
+        elapsed=time.monotonic()-run_start
+        scanned=len(state["diag"])-started_count
+        remaining=len(state["u"])-len(state["diag"])
+        estimate=elapsed/scanned*remaining/60 if scanned>=10 else None
+        suffix=f" | Elapsed {elapsed/60:.1f} min"
+        if estimate is not None: suffix+=f" | Rough remaining {estimate:.0f} min (current pace; may change)"
+        progress(len(state["diag"]),len(state["u"]),stock.ticker+suffix)
         if row["status"]=="Error" and any(x in row.get("reason","").lower() for x in ["ratelimit","too many requests","rate limit","429"]):
             stopped=True;break
-        time.sleep(pause)
+        if pause>0: time.sleep(pause)
+    state["last_run_elapsed_seconds"]=time.monotonic()-run_start
     return stopped
+
 
 def render_expanded():
     st.title("Expanded US — All Nasdaq + Dow")
-    st.caption("Simplified full-run interface v2 — one combined study; no manual batch merging.")
+    st.caption("Expanded-US speed update v3 — reduced pause and shared session calendar; no manual merging.")
     st.info("Current USD market cap strictly greater than $1 billion. Existing US/UK pages and historical engine are unchanged.")
     st.warning("Current listings/current market caps introduce selection and survivorship bias. Directory classification is heuristic; inspect excluded instruments in the audit.")
     with st.expander("Universe source options / audit"):
@@ -122,11 +148,13 @@ def render_expanded():
             st.dataframe(audit,hide_index=True)
             st.download_button("Download inclusion/exclusion audit",audit.to_csv(index=False),"nasdaq_security_audit.csv",key="ex_a_dl")
     with st.expander("Advanced scan controls"):
-        pause=st.selectbox("Pause per stock (seconds)",[1,2,3,5],index=1,key="ex_pause")
+        pause=st.selectbox("Pause per stock (seconds)",[0.25,0.5,1.0,2.0,3.0,5.0],index=0,key="ex_pause_v3")
+        st.caption("Default 0.25s is a reduced delay, not a provider-approved request rate. If throttled, wait, then choose a longer pause before retrying.")
         if st.button("Requeue failed stocks only",key="ex_requeue"):
             failed={r["ticker"] for r in state["diag"] if r["status"]=="Error"}
             state["diag"]=[r for r in state["diag"] if r["ticker"] not in failed]
             st.info(f"Requeued {len(failed)} errors. Click Run / Continue Full Study to retry them.")
+    st.caption("Candidate count is BEFORE market-cap filtering. All candidates still require a cap lookup. Cached provider results may speed later runs, but this does not implement durable automatic market-cap pre-screening.")
     st.caption("One click processes all remaining candidates automatically. Keep this tab open. It may take a long time; the $1bn filter still requires market-cap lookups. Saved results from earlier batches are reused.")
     if st.button("Run / Continue Full Study",type="primary",key="ex_run_full"):
         bar=st.progress(len(state["diag"])/len(state["u"]));msg=st.empty()
@@ -139,6 +167,10 @@ def render_expanded():
     attempted=len(diag);errors=int((diag.status=="Error").sum()) if attempted else 0
     c1,c2,c3=st.columns(3)
     c1.metric("Attempted / candidates",f"{attempted} / {len(state['u'])}");c2.metric("Errors",errors);c3.metric("Signal records",len(signals))
+    if attempted:
+        eligible=int(diag["status"].isin(["Signals found","No matching signal"]).sum())
+        below=int((diag["status"]=="Below/equal USD1bn").sum())
+        st.caption(f"Successfully analysed above $1bn: {eligible:,} | At/below $1bn: {below:,} | Errors: {errors:,}. Signal records may contain many dates per stock.")
     if attempted<len(state["u"]) or errors: st.warning("Partial / incomplete coverage: remaining candidates or errors exist. Tables combine all successfully evaluated stocks so far.")
     else: st.success("All candidates attempted without recorded errors. Market-cap and other eligibility exclusions still apply.")
     if not signals.empty:
